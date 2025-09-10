@@ -78,12 +78,18 @@
             border-radius: 10px;
             overflow: hidden;
             margin-bottom: 15px;
+            width: 100%;
+            aspect-ratio: 640 / 480;
         }
         
-        #videoFeed {
+        #localVideo {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
-            height: auto;
-            display: block;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 10px;
         }
         
         .session-timer {
@@ -512,7 +518,8 @@
                 </div>
                 
                 <div class="video-container">
-                    <img id="videoFeed" src="/video_feed" alt="실시간 영상">
+                    <video id="localVideo" autoplay playsinline muted></video>
+                    <canvas id="canvas" style="display: none;"></canvas>
                     <div class="session-timer" id="sessionTimer">00:00</div>
                     <div class="fps-counter">
                         FPS: <span id="fpsCounter">0</span>
@@ -695,8 +702,11 @@
         let analysisEndTime = null;
         let fpsCounter = 0;
         let lastFpsTime = Date.now();
+        let frameSenderInterval = null;
         
         // DOM 요소
+        const videoElement = document.getElementById('localVideo');
+        const canvasElement = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
         const resetBtn = document.getElementById('resetBtn');
@@ -786,12 +796,13 @@
             log(`📊 분석 상태 업데이트: ${data.analyzing ? '시작' : '완료'}`);
             isAnalyzing = data.analyzing;
             
-            if (data.analyzing) {
+            if (isAnalyzing) {
                 analysisStartTime = Date.now();
                 analysisEndTime = null;
+                startSendingFrames();
             } else {
                 analysisEndTime = Date.now();
-                // 분석 완료 후 AI 조언 버튼 활성화
+                stopSendingFrames();
                 getAdviceBtn.disabled = false;
                 updateAiStatus('분석 완료! AI 조언을 받을 수 있습니다.', 'ready');
             }
@@ -903,35 +914,34 @@
             socket.emit('toggle_analysis', { analyze: false });
         });
         
-        resetBtn.addEventListener('click', async () => {
+        resetBtn.addEventListener('click', () => {
             log('🔄 메트릭 초기화 요청');
-            try {
-                const response = await fetch('/api/reset_metrics');
-                const result = await response.json();
-                if (result.status === 'success') {
-                    log('✅ 메트릭 초기화 완료');
-                    sessionStartTime = Date.now();
-                    analysisStartTime = null;
-                    analysisEndTime = null;
-                    getAdviceBtn.disabled = true;
-                    document.getElementById('aiAdvice').innerHTML = '';
-                    updateAiStatus('면접 분석을 완료한 후 AI 조언을 받을 수 있습니다.');
-                } else {
-                    log(`❌ 초기화 실패: ${result.message}`);
-                }
-            } catch (error) {
-                log(`❌ 초기화 오류: ${error.message}`);
+            socket.emit('reset_metrics');
+        });
+
+        socket.on('reset_metrics_response', (result) => {
+            if (result.status === 'success') {
+                log('✅ 메트릭 초기화 완료');
+                sessionStartTime = Date.now();
+                analysisStartTime = null;
+                analysisEndTime = null;
+                getAdviceBtn.disabled = true;
+                document.getElementById('aiAdvice').innerHTML = '';
+                updateAiStatus('면접 분석을 완료한 후 AI 조언을 받을 수 있습니다.');
+            } else {
+                log(`❌ 초기화 실패: ${result.message}`);
             }
         });
         
-        summaryBtn.addEventListener('click', async () => {
+        summaryBtn.addEventListener('click', () => {
             log('📊 요약 정보 요청');
-            try {
-                const response = await fetch('/api/get_summary');
-                const result = await response.json();
-                if (result.status === 'success') {
-                    const summary = result.data;
-                    const summaryText = `
+            socket.emit('get_summary');
+        });
+
+        socket.on('get_summary_response', (result) => {
+            if (result.status === 'success') {
+                const summary = result.data;
+                const summaryText = `
 📊 AI 면접 분석 요약:
 ━━━━━━━━━━━━━━━━━━━
 ⏱️  총 세션 시간: ${summary.session_duration}초
@@ -946,19 +956,16 @@
 ✋ 손 노출 시간: ${summary.hands_visible_seconds}초
 😄 평균 미소 강도: ${summary.avg_smile_intensity}
 ━━━━━━━━━━━━━━━━━━━
-                    `;
-                    alert(summaryText);
-                    log('✅ 요약 정보 표시 완료');
-                } else {
-                    log(`❌ 요약 실패: ${result.message}`);
-                }
-            } catch (error) {
-                log(`❌ 요약 오류: ${error.message}`);
+                `;
+                alert(summaryText);
+                log('✅ 요약 정보 표시 완료');
+            } else {
+                log(`❌ 요약 실패: ${result.message}`);
             }
         });
         
         // AI 조언 받기 버튼
-        getAdviceBtn.addEventListener('click', async () => {
+        getAdviceBtn.addEventListener('click', () => {
             if (getAdviceBtn.disabled) return;
             
             log('🤖 AI 조언 생성 요청');
@@ -969,27 +976,11 @@
             document.getElementById('aiStatus').style.display = 'none';
             updateAiStatus('AI 조언 생성 중...', 'thinking');
             
+            socket.emit('generate_ai_advice');
+        });
+
+        socket.on('generate_ai_advice_response', (adviceResult) => {
             try {
-                // 분석 데이터 가져오기
-                const analysisResponse = await fetch('/api/get_analysis_data');
-                const analysisResult = await analysisResponse.json();
-                
-                if (analysisResult.status !== 'success') {
-                    throw new Error('분석 데이터를 가져올 수 없습니다.');
-                }
-                
-                // Azure OpenAI 조언 생성 (별도 스크립트 호출 필요)
-                // 실제 구현에서는 openai_advisor.py를 통해 처리
-                const adviceResponse = await fetch('/api/generate_ai_advice', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify(analysisResult.data)
-                });
-                
-                const adviceResult = await adviceResponse.json();
-                
                 if (adviceResult.status === 'success') {
                     displayAiAdvice(adviceResult.advice);
                     log('✅ AI 조언 생성 완료');
@@ -997,11 +988,10 @@
                     displayFallbackAdvice(adviceResult.fallback_advice || '조언 생성에 실패했습니다.');
                     log(`⚠️ AI 조언 생성 실패, 기본 조언 제공`);
                 }
-                
             } catch (error) {
-                log(`❌ AI 조언 오류: ${error.message}`);
-                displayFallbackAdvice('AI 서비스에 연결할 수 없습니다. 기본 조언을 확인하세요.');
-                updateAiStatus('AI 서비스 연결 실패', 'error');
+                log(`❌ AI 조언 처리 오류: ${error.message}`);
+                displayFallbackAdvice('AI 서비스 응답을 처리하는 중 오류가 발생했습니다.');
+                updateAiStatus('AI 서비스 응답 오류', 'error');
             } finally {
                 // UI 상태 복구
                 document.getElementById('aiThinking').style.display = 'none';
@@ -1043,6 +1033,7 @@
         // 페이지 로드 시 초기화
         window.addEventListener('load', () => {
             log('🤖 AI 면접 코치 시스템 준비 완료 - Azure OpenAI 기반 과학적 분석');
+            setupCamera();
             updateAnalysisUI();
         });
         
@@ -1053,6 +1044,48 @@
                 socket.disconnect();
             }
         });
+
+        function setupCamera() {
+            navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+                .then(stream => {
+                    videoElement.srcObject = stream;
+                    log('✅ 로컬 카메라 연결 성공');
+
+                    videoElement.onloadedmetadata = () => {
+                        canvasElement.width = videoElement.videoWidth;
+                        canvasElement.height = videoElement.videoHeight;
+                    };
+                })
+                .catch(err => {
+                    log(`❌ 카메라 접근 실패: ${err.name} - ${err.message}`);
+                    alert('카메라에 접근할 수 없습니다. 권한을 확인해주세요.');
+                });
+        }
+
+        function sendFrame() {
+            if (!isAnalyzing || videoElement.paused || videoElement.ended) {
+                return;
+            }
+            const context = canvasElement.getContext('2d');
+            context.drawImage(videoElement, 0, 0, canvasElement.width, canvasElement.height);
+            const imageData = canvasElement.toDataURL('image/jpeg', 0.8); // 품질 80%
+            socket.emit('video_frame', { image: imageData });
+        }
+
+        function startSendingFrames() {
+            if (frameSenderInterval) {
+                clearInterval(frameSenderInterval);
+            }
+            // 0.2초(200ms)마다 프레임 전송 (5 FPS)
+            frameSenderInterval = setInterval(sendFrame, 200);
+        }
+
+        function stopSendingFrames() {
+            if (frameSenderInterval) {
+                clearInterval(frameSenderInterval);
+                frameSenderInterval = null;
+            }
+        }
     </script>
 </body>
 </html>
